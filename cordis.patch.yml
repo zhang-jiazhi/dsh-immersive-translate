@@ -1,0 +1,16 @@
+# @dsh-external/dsh-immersive-translate — 沉浸式翻译的 DSH 形态。
+#
+# 宿主半：抓网页 → 切正文块 → 走 DSH 自己的 `ctx.llm` 做块级翻译；注册
+# /api/dsh-immersive-translate/* 四类路由与两个模型工具（translate_text 划词、
+# translate_page 双语整页）。
+#
+# 客户端半由 package.json 的 `dsh.client.platform` 自动合成（无 client patch 行），
+# 注册三处界面：侧栏主面板（main keyed slot + sidebar.panellist 图标）、
+# 设置 → 沉浸式翻译（settings.section，开发者配置）、全局划词浮层（shell.overlay）。
+#
+# 翻译不需要任何第三方 API key：路由跟随 DSH 默认模型，或在设置页显式指定
+# provider/model。这是与浏览器扩展最本质的差异——扩展把用户引到「开发者 →
+# 自定义 AI 助手」填 key，这里复用 DSH 已经配好的模型目录。
+- insert:
+    - id: immersive-translate
+      name: '@dsh-external/dsh-immersive-translate'
