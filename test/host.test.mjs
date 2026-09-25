@@ -831,6 +831,24 @@ await check('用户规则命中时在 meta 事件里报出', async () => {
   }
 })
 
+await check('每个已实现免费服务的声明上限都不被突破（charLimit/batchLimit 曾被完全忽略）', () => {
+  // 历史上这两处 planBatches 只传 config.batchChars/BATCH_ITEMS，服务自己声明的
+  // charLimit/batchLimit 从未被读取。config.batchChars 可到 12000 而 transmart 的
+  // charLimit 只有 5000，超限会被服务端整批拒绝 → 重试耗尽 → 硬失败。
+  const items = Array.from({ length: 200 }, (_, i) => ({ id: String(i), text: 'y'.repeat(300) }))
+  for (const [id, service] of Object.entries(module.FREE_SERVICES)) {
+    if (service.implemented === false) continue
+    const batches = module.splitForService(items, service)
+    const maxChars = Math.max(...batches.map((b) => b.reduce((a, x) => a + x.text.length + 24, 0)))
+    const maxItems = Math.max(...batches.map((b) => b.length))
+    if (maxChars > service.charLimit) throw new Error(`${id} 单批 ${String(maxChars)} 字符超过 charLimit ${String(service.charLimit)}`)
+    if (maxItems > service.batchLimit) throw new Error(`${id} 单批 ${String(maxItems)} 条超过 batchLimit ${String(service.batchLimit)}`)
+    // 覆盖性：所有条目都要被切进去，不能丢
+    const total = batches.reduce((a, b) => a + b.length, 0)
+    if (total !== items.length) throw new Error(`${id} 切批后条目数 ${String(total)} ≠ ${String(items.length)}`)
+  }
+})
+
 // 清理临时 DSH_HOME。
 rmSync(HOME, { recursive: true, force: true })
 console.log(`\n${String(passed)} host checks passed`)
