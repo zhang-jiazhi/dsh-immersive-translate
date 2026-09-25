@@ -122,6 +122,7 @@ const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><title>fixture
     <p id="already-zh">这是一段中文界面文案</p>
     <p id="mixed-en">Click the 设置 button to open the repository</p>
     <p id="mixed-en2">Hello 世界</p>
+    <p id="zh-with-latin">比较备份和Web配置文件清单</p>
     <div id="shell" style="display:flex"><div style="display:flex"><span id="deep1">Hello world</span></div></div>
   </body></html>`
 
@@ -340,6 +341,151 @@ try {
     assert.ok(mixed2.startsWith('【译】'), `"Hello 世界" 必须被翻译，实际="${mixed2}"`)
     // 同时不能把纯中文也送去翻（否则等于没过滤）。
     assert.equal(await page.getAttribute('#already-zh', 'data-imt-done'), null, '纯中文仍应被跳过')
+  })
+
+  await check('宿主把条目报进 missing 时：保持原文、绝不打 done 标记', async () => {
+    // 真 bug（2026-09-25 实测，本会话末段）：宿主原先用**原文回填**漏译条目，
+    // 客户端无法区分"原文"和"真译文"，把它当译文写回并打了 data-imt-done ——
+    // 这块内容此后再也不重试，表现就是一整句英文始终是英文却带着 done 标记。
+    // 这里让宿主**一直**报 missing：若客户端还打 done，本用例就会失败。
+    let batchCalls = 0
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await page.route('**/api/dsh-immersive-translate/**', async (route) => {
+      const url = route.request().url()
+      if (url.includes('/settings')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        return
+      }
+      const body = JSON.parse(route.request().postData() ?? '{}')
+      batchCalls += 1
+      const missing = (body.items ?? []).map((item) => item.id)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, translations: {}, missing, failed: missing.length, total: missing.length }) })
+    })
+    await page.goto(ORIGIN)
+    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    await page.waitForTimeout(400)
+    await enable()
+    // 留足时间让它跑完首轮 + 几轮重试（重试退避 0.4/0.8/1.2s）
+    await page.waitForTimeout(6000)
+    const seen = await page.evaluate(() => ({
+      done: document.querySelector('#plain')?.getAttribute('data-imt-done'),
+      text: document.querySelector('#plain')?.textContent,
+      doneCount: document.querySelectorAll('[data-imt-done]').length,
+      failed: document.querySelector('.imt-ball-wrap')?.getAttribute('data-failed'),
+    }))
+    assert.equal(seen.done, null, '漏译的块绝不能被打上 done 标记（否则永不重试）')
+    assert.equal(seen.text?.trim(), 'Hello world', '漏译时必须保持页面原文不动')
+    assert.equal(seen.doneCount, 0, '一条都没译出来时不应有任何 done 标记')
+    assert.ok(batchCalls >= 2, `漏译后必须主动重试（不依赖页面变化），实际只发了 ${String(batchCalls)} 次`)
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await useStandardHost()
+  })
+
+  await check('旧宿主把原文当译文回显时，不会把它写进页面、也不打 done（兼容未重启的宿主）', async () => {
+    // 旧宿主（未重启）漏译时会**原样回显**我们发去的文本，响应里没有 missing 字段。
+    // 若不识别，客户端会把英文原文当译文写回并打 DONE_FLAG —— 这就是用户看到的
+    // "漏翻"且永不重试。这里模拟旧宿主：永远回显原文。
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await page.route('**/api/dsh-immersive-translate/**', async (route) => {
+      const url = route.request().url()
+      if (url.includes('/settings')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        return
+      }
+      const body = JSON.parse(route.request().postData() ?? '{}')
+      // 旧宿主行为：把 item.text 原样放进 translations，不带 missing。
+      const translations = {}
+      for (const item of body.items ?? []) translations[item.id] = item.text
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, translations, failed: 0, total: (body.items ?? []).length }) })
+    })
+    await page.goto(ORIGIN)
+    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    await page.waitForTimeout(400)
+    await enable()
+    await page.waitForTimeout(5000)
+    const seen = await page.evaluate(() => ({
+      text: document.querySelector('#plain')?.textContent,
+      done: document.querySelector('#plain')?.getAttribute('data-imt-done'),
+    }))
+    // 关键：英文原文不能被当成"译文"写回并锁死。
+    assert.equal(seen.text?.trim(), 'Hello world', '旧宿主回显原文时，页面文字必须保持原样')
+    assert.equal(seen.done, null, '绝不能在"其实没翻"的情况下打上 done 标记')
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await useStandardHost()
+  })
+
+  await check('漏译块在没有页面变化的情况下也会被主动补翻', async () => {
+    // 关键回归：漏译块没有 DONE_FLAG，但 collect 只在页面变化时才重跑 ——
+    // 静置的页面否则就永久留白。首轮全 missing、之后正常，必须能自己补上。
+    let round = 0
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await page.route('**/api/dsh-immersive-translate/**', async (route) => {
+      const url = route.request().url()
+      if (url.includes('/settings')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        return
+      }
+      const body = JSON.parse(route.request().postData() ?? '{}')
+      round += 1
+      const translations = {}
+      const missing = []
+      for (const item of body.items ?? []) {
+        if (round <= 1) missing.push(item.id)
+        else translations[item.id] = `【译】${String(item.text).slice(0, 60)}`
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, translations, missing, failed: missing.length, total: (body.items ?? []).length }) })
+    })
+    await page.goto(ORIGIN)
+    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    await page.waitForTimeout(400)
+    await enable()
+    for (let i = 0; i < 20 && (await page.getAttribute('#plain', 'data-imt-done')) === null; i += 1) {
+      await page.waitForTimeout(500)
+    }
+    const after = await page.evaluate(() => ({
+      done: document.querySelector('#plain')?.getAttribute('data-imt-done'),
+      text: document.querySelector('#plain')?.textContent,
+    }))
+    assert.equal(after.done, '1', `未译块必须被主动重试并最终翻出（实际 done=${String(after.done)}）`)
+    assert.ok(after.text?.startsWith('【译】'), `重试后应写入译文，实际="${String(after.text)}"`)
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await useStandardHost()
+  })
+
+  await check('中文夹英文标识符的标签不会被误送去翻译（比例阈值曾在此翻车）', async () => {
+    // 真故障链（2026-09-25 实测）：旧判据用"汉字占比 >= 0.8"，
+    // "比较备份和Web配置文件清单"（0.786）刚好卡在阈值下方 → 被送去翻译；
+    // 旧宿主对中文原样回显 → "回显兜底"判成漏译 → 无限重试、球一直红色。
+    // 现在按"拉丁词个数"判主体：中文夹零星标识符 = 已是中文，跳过。
+    assert.equal(await page.getAttribute('#zh-with-latin', 'data-imt-done'), null, '中文标签不该被翻译')
+    assert.equal((await page.textContent('#zh-with-latin'))?.trim(), '比较备份和Web配置文件清单', '中文标签必须保持原样')
   })
 
   await check('流式新内容会自动补翻（MutationObserver）', async () => {

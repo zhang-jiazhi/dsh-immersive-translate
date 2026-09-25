@@ -431,20 +431,24 @@ await check('batch 路由丢弃空白项、空数组报 400', async () => {
   assert.equal(res2.status, 400)
 })
 
-await check('batch 路由在模型漏译时回填原文而不是留空洞', async () => {
-  // 模型偶尔会漏掉条目。客户端拿不到译文时若留空，页面上会凭空少一段文字——
-  // 宁可回填原文，也不要破坏页面内容。
+await check('batch 路由把漏译条目报进 missing，绝不用原文冒充译文', async () => {
+  // 真 bug（2026-09-25 实测）：原先漏译时用**原文回填** translations，
+  // 客户端无法区分"原文"和"真译文"，于是把它当译文写回页面并打上 done 标记，
+  // 这块内容此后再也不重试 —— 用户看到的就是"漏翻"（本会话末段整句英文带 done）。
+  // 现在必须：translations 里没有它、id 出现在 missing 里，由客户端保持原文不动。
   const ctx = makeCtx({ translation: () => 'not-json-at-all' })
   module.apply(ctx, { engine: 'dsh-model' })
   const res = makeRes()
   await ctx.__routes.get('/api/dsh-immersive-translate/batch').handler(
-    makeReq({ body: { items: [{ id: 'b1', text: 'Hello world' }] } }),
+    makeReq({ body: { items: [{ id: 'b1', text: 'Hello world' }, { id: 'b2', text: 'Good day' }] } }),
     res,
   )
   assert.equal(res.status, 200)
   const json = res.__json()
-  assert.equal(json.translations.b1, 'Hello world', '漏译必须回填原文')
-  assert.equal(json.failed, 1, '失败计数要如实反映')
+  assert.equal(json.translations.b1, undefined, '漏译绝不能回填原文冒充译文')
+  assert.equal(json.translations.b2, undefined, '漏译绝不能回填原文冒充译文')
+  assert.deepEqual([...json.missing].sort(), ['b1', 'b2'], '漏译条目必须在 missing 里如实上报')
+  assert.equal(json.failed, 2, '失败计数要如实反映')
 })
 
 await check('batch 路由拒绝跨站来源', async () => {
