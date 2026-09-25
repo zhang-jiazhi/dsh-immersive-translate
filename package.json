@@ -23,8 +23,8 @@
     "@deepseek-ai/dsh-tools": ">=0.1.5-rc <2"
   },
   "scripts": {
-    "test": "node test/extract.test.mjs && node test/host.test.mjs && node test/inject-browser.mjs",
-    "test:fast": "node test/extract.test.mjs && node test/host.test.mjs"
+    "test": "node test/extract.test.mjs && node test/host.test.mjs && node test/hardfail.test.mjs && node test/inject-browser.mjs",
+    "test:fast": "node test/extract.test.mjs && node test/host.test.mjs && node test/hardfail.test.mjs"
   },
   "dsh": {
     "bundle": {
