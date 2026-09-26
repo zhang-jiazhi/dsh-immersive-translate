@@ -116,7 +116,7 @@ export async function startServer(options = {}) {
     if (url.pathname === '/api/dsh-immersive-translate/settings') {
       json(200, {
         ok: true,
-        hostProtocol: 2,
+        hostProtocol: 3,
         config: {
           targetLanguage: 'zh-CN',
           displayMode: 'translation',

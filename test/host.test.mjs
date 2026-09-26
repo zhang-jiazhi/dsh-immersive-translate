@@ -849,6 +849,26 @@ await check('每个已实现免费服务的声明上限都不被突破（charLim
   }
 })
 
+await check('免费服务链对回显条目的换家判据：句子换家重试，专名/已译接受', () => {
+  // v3 行为的核心判据：服务把原文原样吐回时，"句子形态"的回显要换下一个服务
+  // 再试（旧链路整批收工 → 这句从此没有第二次机会 = 漏翻）；专名/token/路径、
+  // 已接近目标语言的串直接接受（它们本就该原样通过，重试只会白打请求）。
+  const { isEchoWorthRetrying } = module
+  // 整句原样回显 → 换家重试。
+  assert.equal(isEchoWorthRetrying('No argv info there. I have enough.', 'No argv info there. I have enough.', 'zh-CN'), true)
+  assert.equal(isEchoWorthRetrying('Click the button to open it', 'Click  the button to open it', 'zh-CN'), true, '空白差异归一化后仍算回显')
+  // 专名 / 单 token / 路径 → 接受回显。
+  assert.equal(isEchoWorthRetrying('GitHub', 'GitHub', 'zh-CN'), false)
+  assert.equal(isEchoWorthRetrying('tokenrhythm/deepseek-flashMax', 'tokenrhythm/deepseek-flashMax', 'zh-CN'), false)
+  assert.equal(isEchoWorthRetrying('v3', 'v3', 'zh-CN'), false)
+  // 已是中文主体（目标中文）→ 接受。
+  assert.equal(isEchoWorthRetrying('比较备份和Web配置文件清单', '比较备份和Web配置文件清单', 'zh-CN'), false)
+  // 目标不是中文时，纯拉丁串=已是目标语言 → 接受。
+  assert.equal(isEchoWorthRetrying('Hello world', 'Hello world', 'en'), false)
+  // 真译文（与原文不同）→ 永远接受，不换家。
+  assert.equal(isEchoWorthRetrying('Hello world', '你好，世界', 'zh-CN'), false)
+})
+
 // 清理临时 DSH_HOME。
 rmSync(HOME, { recursive: true, force: true })
 console.log(`\n${String(passed)} host checks passed`)

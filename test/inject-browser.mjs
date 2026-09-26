@@ -60,6 +60,17 @@ const FAKE_TRANSLATIONS = {
   'click here': '点这里',
   'Use npm install to install': '用 npm install 来安装',
   'bold text': '粗体文字',
+  'Intro before table': '表格前的介绍',
+  'Header one': '表头一',
+  'Header two': '表头二',
+  'Cell alpha': '单元格甲',
+  'Cell beta': '单元格乙',
+  'docs for': '的文档',
+  'Keep shape': '保持形状',
+  bold: '粗体',
+  text: '文字',
+  'Mixed container paragraph': '混合容器里的段落',
+  'Loose inline sibling text': '容器里松散的行内兄弟文本',
 }
 
 /**
@@ -116,6 +127,12 @@ const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><title>fixture
     <p id="withlink">This is a paragraph with a link inside it <a href="https://example.com/">click here</a></p>
     <p id="withcode">Use <code>npm install</code> to install</p>
     <p id="withbold">This is a paragraph with a <strong>bold text</strong> inside</p>
+    <p id="withnested">Keep <strong>bold <em>text</em></strong> shape</p>
+    <div id="tablewrap"><p>Intro before table</p>
+      <table><thead><tr><th>Header one</th><th>Header two</th></tr></thead>
+      <tbody><tr><td>Cell alpha</td><td>Cell beta</td></tr></tbody></table>
+    </div>
+    <div id="mixedbag"><p>Mixed container paragraph</p><span>Loose inline sibling text</span></div>
     <div id="skipme" translate="no"><p>Hello world</p></div>
     <ul><li id="li1">Hello world</li></ul>
     <div style="display:contents"><div style="display:contents"><p id="contents1">Hello world</p></div></div>
@@ -162,7 +179,7 @@ const page = await browser.newPage()
  * @returns {Promise<void>}
  */
 async function useStandardHost(options = {}) {
-  const hostProtocol = options.hostProtocol === undefined ? 2 : options.hostProtocol
+  const hostProtocol = options.hostProtocol === undefined ? 3 : options.hostProtocol
   const extraConfig = options.config ?? {}
   await page.route('**/api/dsh-immersive-translate/**', async (route) => {
     const url = route.request().url()
@@ -295,6 +312,40 @@ try {
     assert.equal((await strong.textContent())?.trim(), '粗体文字')
   })
 
+  await check('嵌套内联结构（strong>em）逐层翻译且结构不塌', async () => {
+    // 旧实现对元素条目直接 node.textContent = 译文：<strong>内部还有 <em> 时，
+    // em 元素被整个压成纯文本 —— 加粗/斜体样式丢失（"翻译完格式坏了"）。
+    // 现在元素条目按自己的结构递归送翻，写回按占位符重建。
+    const strong = await page.$('#withnested strong')
+    assert.ok(strong !== null, 'strong element must survive')
+    const em = await page.$('#withnested strong em')
+    assert.ok(em !== null, '嵌套的 <em> 必须保留（旧实现会被 textContent 压平）')
+    assert.match((await strong.textContent()) ?? '', /粗体/, 'strong 内部文字应被翻译')
+    assert.equal((await em.textContent())?.trim(), '文字', 'em 内部文字应被翻译')
+  })
+
+  await check('表格：与段落混排也能被翻译，且 table/thead/tr/td 结构一字不塌', async () => {
+    // 两个旧缺陷一起守：
+    //  ① table 的 display 不在块级清单里，与 <p> 同层时整张表被跳过（漏翻译）；
+    //  ② 独立短表被当成叶子块，thead/tbody/tr 被占位符化后 textContent 写平（格式破坏）。
+    const table = await page.$('#tablewrap table')
+    assert.ok(table !== null, 'table element must survive')
+    assert.equal(await page.$$eval('#tablewrap thead tr th', (nodes) => nodes.length), 2, '表头结构必须保留')
+    assert.equal(await page.$$eval('#tablewrap tbody tr td', (nodes) => nodes.length), 2, '单元格结构必须保留')
+    assert.match((await page.textContent('#tablewrap th')) ?? '', /表头/, '表头文字应被翻译')
+    const cells = await page.$$eval('#tablewrap tbody td', (nodes) => nodes.map((n) => n.textContent?.trim() ?? ''))
+    assert.ok(cells.every((text) => text.includes('单元格')), `单元格文字应被翻译，实际=${JSON.stringify(cells)}`)
+    assert.match((await page.textContent('#tablewrap p')) ?? '', /表格前的介绍/, '表格前的段落应被翻译')
+  })
+
+  await check('混合容器：块级段落旁边的行内兄弟也会被翻译（旧实现整段漏翻）', async () => {
+    // 旧实现只下钻"块级子元素"：容器里 <p> 旁边直接挂的 <span> 正文永远轮不到。
+    const span = await page.$('#mixedbag span')
+    assert.ok(span !== null, 'span element must survive')
+    assert.equal((await span.textContent())?.trim(), '容器里松散的行内兄弟文本', '行内兄弟文本应被翻译')
+    assert.match((await page.textContent('#mixedbag p')) ?? '', /混合容器/, '同容器的段落应照常翻译')
+  })
+
   await check('列表项也被翻译', async () => {
     assert.equal((await page.textContent('#li1'))?.trim(), '你好，世界')
   })
@@ -353,7 +404,7 @@ try {
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
@@ -390,19 +441,22 @@ try {
     await useStandardHost()
   })
 
-  await check('旧宿主把原文当译文回显时，不会把它写进页面、也不打 done（兼容未重启的宿主）', async () => {
-    // 旧宿主（未重启）漏译时会**原样回显**我们发去的文本，响应里没有 missing 字段。
-    // 若不识别，客户端会把英文原文当译文写回并打 DONE_FLAG —— 这就是用户看到的
-    // "漏翻"且永不重试。这里模拟旧宿主：永远回显原文。
+  await check('协议 v3：宿主返回的回显译文按最终答案接受并打 done（不重试风暴）', async () => {
+    // v3 语义：宿主的免费服务链内部已经对回显条目换服务重试过，换遍所有服务
+    // 仍只剩回显 = 各家都判定不可译（专名/token），客户端必须接受、写回并打
+    // done 收敛。若客户端还在自行猜测"这是漏译"，就会无限重试——这里让宿主
+    // **一直**回显原文，断言批次数有界（不随时间增长）且块被正常标记完成。
+    let batchCalls = 0
     await page.unroute('**/api/dsh-immersive-translate/**')
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
-      // 旧宿主行为：把 item.text 原样放进 translations，不带 missing。
+      batchCalls += 1
+      // 宿主行为：把 item.text 原样放进 translations（回显），无 missing。
       const translations = {}
       for (const item of body.items ?? []) translations[item.id] = item.text
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, translations, failed: 0, total: (body.items ?? []).length }) })
@@ -421,13 +475,16 @@ try {
     await page.waitForTimeout(400)
     await enable()
     await page.waitForTimeout(5000)
+    const callsAfterSettle = batchCalls
+    await page.waitForTimeout(4000)
     const seen = await page.evaluate(() => ({
       text: document.querySelector('#plain')?.textContent,
       done: document.querySelector('#plain')?.getAttribute('data-imt-done'),
     }))
-    // 关键：英文原文不能被当成"译文"写回并锁死。
-    assert.equal(seen.text?.trim(), 'Hello world', '旧宿主回显原文时，页面文字必须保持原样')
-    assert.equal(seen.done, null, '绝不能在"其实没翻"的情况下打上 done 标记')
+    // 关键：回显即最终答案——写回（内容不变）并打 done，批次数不再增长。
+    assert.equal(seen.done, '1', '回显译文应被接受并打上 done 标记（收敛）')
+    assert.equal(seen.text?.trim(), 'Hello world', '回显译文写回后页面文字不变')
+    assert.equal(batchCalls, callsAfterSettle, `批次请求必须收敛（等待前后不增长，实际 ${String(callsAfterSettle)} → ${String(batchCalls)}）`)
     await page.unroute('**/api/dsh-immersive-translate/**')
     await useStandardHost()
   })
@@ -440,7 +497,7 @@ try {
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, showBall: true, freeConcurrency: 4, batchChars: 3500, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
@@ -510,6 +567,11 @@ try {
     assert.match(html, /<a href="https:\/\/example\.com\/">click here<\/a>/)
     const codeHtml = await page.innerHTML('#withcode')
     assert.match(codeHtml, /Use <code>npm install<\/code> to install/)
+    // 嵌套内联与表格也要还原到最初的形状（部分翻过的块重扫后还原不丢真原文）。
+    const nestedHtml = await page.innerHTML('#withnested')
+    assert.match(nestedHtml, /Keep <strong>bold <em>text<\/em><\/strong> shape/)
+    assert.equal(await page.$$eval('#tablewrap tbody tr td', (nodes) => nodes.length), 2, '还原后表格结构必须完好')
+    assert.equal((await page.textContent('#tablewrap tbody td'))?.trim(), 'Cell alpha')
     assert.equal(await page.$('.imt-insert'), null, '双语插入节点不应残留')
   })
 
@@ -519,7 +581,7 @@ try {
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'dual', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [] }, languages: [] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'dual', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [] }, languages: [] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
@@ -544,7 +606,7 @@ try {
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'en', displayMode: 'translation', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [] }, languages: [] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'en', displayMode: 'translation', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [] }, languages: [] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
@@ -588,7 +650,7 @@ try {
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [] }, languages: [] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [] }, languages: [] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
@@ -1012,7 +1074,7 @@ try {
           await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, config: { targetLanguage: 'zh-CN', displayMode: 'translation', batchChars: 3500, concurrency: 1, userRules: [] } }) })
           return
         }
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', batchChars: 3500, concurrency: 1, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'translation', batchChars: 3500, concurrency: 1, userRules: [] }, languages: [{ id: 'zh-CN', label: '中文' }] }) })
         return
       }
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, translations: {}, total: 0, failed: 0 }) })
@@ -1084,7 +1146,7 @@ try {
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
       const url = route.request().url()
       if (url.includes('/settings')) {
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 2, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [{ excludeSelectors: ['#li1'] }] }, languages: [] }) })
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, hostProtocol: 3, config: { targetLanguage: 'zh-CN', displayMode: 'translation', autoTranslate: false, batchChars: 3500, concurrency: 1, userRules: [{ excludeSelectors: ['#li1'] }] }, languages: [] }) })
         return
       }
       const body = JSON.parse(route.request().postData() ?? '{}')
