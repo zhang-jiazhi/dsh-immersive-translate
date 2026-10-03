@@ -121,8 +121,10 @@ function findExecutable() {
 
 /** 夹具页：覆盖纯文本段、内联链接、加粗、行内代码、跳过区、列表。 */
 /** 基础夹具。 */
-const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><title>fixture</title></head><body>
-    <h1>Hello world</h1>
+const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><title>fixture</title><style>html,body{height:100%;margin:0;overflow:hidden}</style></head><body>
+    <div id="model-zone" data-conversation-region="composer"><span data-model-compact>deepseek-v4-flash · GPT-4o</span><div data-composer-card style="display:none"></div></div>
+    <div id="outside-chrome" data-conversation-region="header"><span>DeepSeek Harness Workspace</span></div>
+    <div data-conversation-content><h1>Hello world</h1>
     <p id="plain">Hello world</p>
     <p id="withlink">This is a paragraph with a link inside it <a href="https://example.com/">click here</a></p>
     <p id="withcode">Use <code>npm install</code> to install</p>
@@ -141,6 +143,8 @@ const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><title>fixture
     <p id="mixed-en2">Hello 世界</p>
     <p id="zh-with-latin">比较备份和Web配置文件清单</p>
     <div id="shell" style="display:flex"><div style="display:flex"><span id="deep1">Hello world</span></div></div>
+    </div>
+    <p id="after-scope">Outside whitelist text</p>
   </body></html>`
 
 // 页面必须有真实同源 origin：`setContent` 落在 about:blank，相对 URL 的 fetch 会直接
@@ -156,7 +160,7 @@ const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><title>fixture
 function longFixture(count) {
   const rows = []
   for (let i = 0; i < count; i += 1) rows.push(`<p id="row${String(i)}">English paragraph number ${String(i)} for the long page test.</p>`)
-  return `<!doctype html><html><head><meta charset="utf-8"></head><body>${rows.join('')}</body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body><div data-composer-card style="display:none"></div><div data-conversation-content>${rows.join('')}</div></body></html>`
 }
 
 const server = createServer((req, res) => {
@@ -248,7 +252,6 @@ try {
     window.__effects = effects
   })
 
-  /** 点一下右下角的悬浮开关并等译文落地。 */
   /** 点悬浮球展开操作条，再点操作项；`label` 为操作文案。 */
   const clickBallAction = async (label) => {
     // 操作条可能已展开（上一次点击留下的）；只在没显示时才点球，保证幂等。
@@ -257,6 +260,7 @@ try {
     await target.waitFor({ state: 'visible' })
     await target.click()
   }
+
   /**
    * 确保翻译处于开启状态并等结果落地。
    *
@@ -298,6 +302,52 @@ try {
     assert.equal(await anchor.getAttribute('href'), 'https://example.com/')
     const p = await page.textContent('#withlink')
     assert.match(p ?? '', /这是一个包含链接的段落/)
+  })
+
+  await check('含内联元素的写回不搬动元素节点（React 协调安全的前提）', async () => {
+    // 真 React 18 复现过的崩溃（2026-09-26 审查）：旧实现用 fragment +
+    // replaceChildren 重建子节点列表，把 React 拥有的 <a>/<strong> 搬了家；
+    // React 下次协调用被搬走的节点当 insertBefore 锚点 → 整棵对话子树卸载。
+    // 这里钉住修复的本质：写回期间元素**从未被移除**（MutationObserver 无记录），
+    // 且节点身份与父节点不变。
+    const observed = await page.evaluate(async () => {
+      const link = document.querySelector('#withlink a')
+      const parent = link.parentElement
+      const removed = []
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.removedNodes) if (node === link) removed.push('link-removed')
+        }
+      })
+      // 只翻这一个块：把已翻的块还原到未翻状态再触发一次
+      const marker = { link, parent, removed }
+      window.__probe = marker
+      observer.observe(parent, { childList: true, subtree: false })
+      return { sameParent: link.parentElement === parent, inDoc: link.isConnected }
+    })
+    assert.equal(observed.sameParent, true)
+    assert.equal(observed.inDoc, true)
+    // 触发一次重新翻译（还原 + 再开启，让带链接的块走一遍完整写回）
+    await clickBallAction('还原原文')
+    await page.waitForTimeout(400)
+    await clickBallAction('翻译此页')
+    await page.waitForTimeout(1600)
+    const after = await page.evaluate(() => {
+      const marker = window.__probe
+      const link = document.querySelector('#withlink a')
+      return {
+        removed: marker.removed,
+        sameNode: link === marker.link,
+        sameParent: link.parentElement === marker.parent,
+        text: (link.textContent ?? '').trim(),
+        p: (document.querySelector('#withlink')?.textContent ?? '').trim(),
+      }
+    })
+    assert.deepEqual(after.removed, [], '写回期间 <a> 不得被移除（搬动节点的证据）')
+    assert.equal(after.sameNode, true, '必须是同一个 <a> 节点（React 的记录依赖节点身份）')
+    assert.equal(after.sameParent, true, '父节点不得改变')
+    assert.equal(after.text, '点这里')
+    assert.match(after.p, /这是一个包含链接的段落/)
   })
 
   await check('行内 <code>：元素保留（不被译文拆掉），内部文字不翻译', async () => {
@@ -550,7 +600,8 @@ try {
       const p = document.createElement('p')
       p.id = 'late'
       p.textContent = 'Hello world'
-      document.body.append(p)
+      // 必须挂进白名单区（正文区之外的新内容按设计不翻译）。
+      document.querySelector('[data-conversation-content]').append(p)
     })
     await page.waitForTimeout(1600)
     assert.equal((await page.textContent('#late'))?.trim(), '你好，世界')
@@ -940,61 +991,6 @@ try {
     })
   })
 
-  await check('「打开页面自动翻译」开启后，一进页面不用点球就自动翻', async () => {
-    // 真 bug：autoTranslate 原先没登记在宿主 DEFAULTS 里，落盘被白名单丢弃，
-    // 刷新即失效 —— 用户看到的就是"这个功能不生效"。这条用例守住端到端生效。
-    await page.unroute('**/api/dsh-immersive-translate/**')
-    await useStandardHost({ config: { autoTranslate: true } })
-    await page.goto(ORIGIN)
-    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
-    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
-    await page.addScriptTag({ content: clientSource })
-    await page.evaluate(() => {
-      const mod = window.__entry.factory((name) => {
-        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
-        throw new Error(`unexpected require: ${name}`)
-      })
-      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
-    })
-    // 全程不点悬浮球，只等自动翻译跑完
-    await page.waitForTimeout(2500)
-    const auto = await page.evaluate(() => ({
-      state: document.querySelector('.imt-ball-wrap')?.getAttribute('data-state'),
-      text: document.querySelector('#plain')?.textContent,
-      done: document.querySelectorAll('[data-imt-done]').length,
-    }))
-    assert.ok(auto.done > 0, `自动翻译应真的翻出块来，实际 state=${String(auto.state)} text=${String(auto.text)}`)
-    // 不断言具体译文：夹具里 "Hello world" 有固定假译文，断言前缀会与假宿主耦合。
-    assert.notEqual(auto.text?.trim(), 'Hello world', `自动翻译必须真的改掉页面原文，实际="${String(auto.text)}"`)
-  })
-
-  await check('「悬浮球」开关能隐藏/显示悬浮球（且不影响翻译）', async () => {
-    await page.unroute('**/api/dsh-immersive-translate/**')
-    await useStandardHost({ config: { showBall: false } })
-    await page.goto(ORIGIN)
-    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
-    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
-    await page.addScriptTag({ content: clientSource })
-    await page.evaluate(() => {
-      const mod = window.__entry.factory((name) => {
-        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
-        throw new Error(`unexpected require: ${name}`)
-      })
-      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
-    })
-    await page.waitForTimeout(1200)
-    const hidden = await page.evaluate(() => {
-      const w = document.querySelector('.imt-ball-wrap')
-      return { exists: !!w, display: w ? getComputedStyle(w).display : null, rectW: w ? Math.round(w.getBoundingClientRect().width) : null }
-    })
-    assert.ok(hidden.exists, '隐藏时仍要保留 DOM（否则引擎状态监听会断）')
-    assert.equal(hidden.display, 'none', 'showBall=false 时悬浮球必须隐藏')
-    assert.equal(hidden.rectW, 0, '隐藏时不应占位')
-    // 恢复默认，避免影响后续用例
-    await page.unroute('**/api/dsh-immersive-translate/**')
-    await useStandardHost()
-  })
-
   await check('设置面板能挂载，且翻译引擎默认是自带免费服务', async () => {
     // 用一个极简 hooks 运行时把设置面板真挂出来：这样"引擎下拉默认值"是可验证的，
     // 而不是只检查源码里有没有那行字。
@@ -1141,6 +1137,61 @@ try {
     await useStandardHost()
   })
 
+  await check('「打开页面自动翻译」开启后，一进页面不用点球就自动翻', async () => {
+    // 真 bug：autoTranslate 原先没登记在宿主 DEFAULTS 里，落盘被白名单丢弃，
+    // 刷新即失效 —— 用户看到的就是"这个功能不生效"。这条用例守住端到端生效。
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await useStandardHost({ config: { autoTranslate: true } })
+    await page.goto(ORIGIN)
+    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    // 全程不点悬浮球，只等自动翻译跑完
+    await page.waitForTimeout(2500)
+    const auto = await page.evaluate(() => ({
+      state: document.querySelector('.imt-ball-wrap')?.getAttribute('data-state'),
+      text: document.querySelector('#plain')?.textContent,
+      done: document.querySelectorAll('[data-imt-done]').length,
+    }))
+    assert.ok(auto.done > 0, `自动翻译应真的翻出块来，实际 state=${String(auto.state)} text=${String(auto.text)}`)
+    // 不断言具体译文：夹具里 "Hello world" 有固定假译文，断言前缀会与假宿主耦合。
+    assert.notEqual(auto.text?.trim(), 'Hello world', `自动翻译必须真的改掉页面原文，实际="${String(auto.text)}"`)
+  })
+
+  await check('「悬浮球」开关能隐藏/显示悬浮球（且不影响翻译）', async () => {
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await useStandardHost({ config: { showBall: false } })
+    await page.goto(ORIGIN)
+    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    await page.waitForTimeout(1200)
+    const hidden = await page.evaluate(() => {
+      const w = document.querySelector('.imt-ball-wrap')
+      return { exists: !!w, display: w ? getComputedStyle(w).display : null, rectW: w ? Math.round(w.getBoundingClientRect().width) : null }
+    })
+    assert.ok(hidden.exists, '隐藏时仍要保留 DOM（否则引擎状态监听会断）')
+    assert.equal(hidden.display, 'none', 'showBall=false 时悬浮球必须隐藏')
+    assert.equal(hidden.rectW, 0, '隐藏时不应占位')
+    // 恢复默认，避免影响后续用例
+    await page.unroute('**/api/dsh-immersive-translate/**')
+    await useStandardHost()
+  })
+
   await check('用户规则的 excludeSelectors 能跳过指定区域', async () => {
     await page.unroute('**/api/dsh-immersive-translate/**')
     await page.route('**/api/dsh-immersive-translate/**', async (route) => {
@@ -1171,6 +1222,73 @@ try {
   })
   // 真实会话有几百个叶子块（对话 + 思维链）。单轮 240 块的上限必须能继续推进，
   // 否则后面的内容永远翻不到——这是用户实际遇到的那个 bug。
+  await check('白名单：正文区正常翻；模型区/界面区/输入区永不翻（模型名不得被改写）', async () => {
+    // 用户要求：界面与模型都要加白名单——DSH 自己的 UI（模型名是标识符）被
+    // 翻译会直接破坏界面。白名单 = data-conversation-content（对话正文）之内、
+    // 输入区（data-composer-card/composer-seat）之外。
+    await page.goto(ORIGIN)
+    await page.evaluate(() => localStorage.removeItem('dsh-immersive-translate:enabled:v1'))
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    await enable()
+    await page.waitForTimeout(1600)
+    const state = await page.evaluate(() => ({
+      plain: document.getElementById('plain')?.textContent?.trim(),
+      model: document.getElementById('model-zone')?.textContent?.trim(),
+      chrome: document.getElementById('outside-chrome')?.textContent?.trim(),
+      after: document.getElementById('after-scope')?.textContent?.trim(),
+      modelDone: document.getElementById('model-zone')?.getAttribute('data-imt-done'),
+      afterDone: document.getElementById('after-scope')?.getAttribute('data-imt-done'),
+    }))
+    assert.equal(state.plain, '你好，世界', '正文区必须正常翻译')
+    assert.equal(state.model, 'deepseek-v4-flash · GPT-4o', '模型名绝不能被翻译（标识符）')
+    assert.equal(state.chrome, 'DeepSeek Harness Workspace', '界面区必须保持原样')
+    assert.match(state.after ?? '', /Outside whitelist text/, '白名单之外的文字保持原样')
+    assert.equal(state.modelDone, null)
+    assert.equal(state.afterDone, null)
+  })
+
+  await check('非会话视图（无对话正文区）：设置页/插件页等宿主 UI 整页跳过', async () => {
+    // 用户明确要求：设置页/插件页/项目列表这些宿主自己的中文 UI 不翻译。
+    // 白名单 = `[data-conversation-content]`（只在会话视图存在）。移除它
+    // （模拟切到设置页）后，纯英文页面也必须保持原样。
+    await page.goto(`${ORIGIN}/long`)
+    await page.evaluate(() => {
+      localStorage.removeItem('dsh-immersive-translate:enabled:v1')
+      document.querySelector('[data-composer-card]')?.remove()
+      const scope = document.querySelector('[data-conversation-content]')
+      if (scope !== null) {
+        while (scope.firstChild !== null) document.body.append(scope.firstChild)
+        scope.remove()
+      }
+    })
+    await page.addScriptTag({ content: `window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };` })
+    await page.addScriptTag({ content: clientSource })
+    await page.evaluate(() => {
+      const mod = window.__entry.factory((name) => {
+        if (name === 'react') return { createElement: (t, p, ...c) => ({ type: t, props: { ...p, children: c } }), useRef: (v) => ({ current: v }), useEffect: () => undefined }
+        throw new Error(`unexpected require: ${name}`)
+      })
+      mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
+    })
+    if (!(await page.isVisible('.imt-menu'))) await page.click('.imt-ball')
+    await page.locator('.imt-menu-item', { hasText: '翻译此页' }).click()
+    await page.waitForTimeout(3000)
+    const untouched = await page.evaluate(() => ({
+      done: document.querySelectorAll('[data-imt-done]').length,
+      first: document.getElementById('row0')?.textContent,
+    }))
+    assert.equal(untouched.done, 0, '非会话视图不得翻译任何块')
+    assert.match(untouched.first ?? '', /^English paragraph number 0/, '页面文字必须保持原样')
+  })
+
   await check('超过单轮上限的长页（600 块）能全部翻完，不遗漏后半部分', async () => {
     await page.goto(`${ORIGIN}/long`)
     // 开关状态现在是持久化的：不清掉的话，上一个用例留下的 "已开启" 会让操作条
@@ -1186,7 +1304,7 @@ try {
       mod.apply({ effect: (f) => f(), slots: { inject: () => () => {}, register: () => () => {} }, get: () => undefined })
     })
     if (!(await page.isVisible('.imt-menu'))) await page.click('.imt-ball')
-    await page.locator('.imt-menu-item', { hasText: '翻译此页' }).click()
+    await page.click('.imt-switch-row')
     // 600 块 / 每批 24 条 / 2 并发，给足时间。
     await page.waitForTimeout(20000)
     const done = await page.evaluate(() => document.querySelectorAll('[data-imt-done]').length)

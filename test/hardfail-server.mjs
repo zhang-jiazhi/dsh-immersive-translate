@@ -26,9 +26,12 @@ function fixtureHtml() {
     fail.push(`<p id="fail${String(i)}">FAILMARK paragraph number ${String(i)} must be translated.</p>`)
   }
   return `<!doctype html><html><head><meta charset="utf-8"><title>imt repro</title></head><body>
+<div data-composer-card style="display:none"></div>
+<div data-conversation-content>
 <h1>复现夹具</h1>
 <div id="okzone">${ok.join('\n')}</div>
 <div id="failzone">${fail.join('\n')}</div>
+</div>
 <script>window.__ModuleLoader__ = { load(entry) { window.__entry = entry } };</script>
 <script src="/client.js"></script>
 <script src="/boot.js"></script>

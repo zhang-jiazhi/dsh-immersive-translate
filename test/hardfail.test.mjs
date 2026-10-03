@@ -109,11 +109,12 @@ async function main() {
 
     // ── 汇报文案：等失败发生、汇报定时器就位后手动触发它（缺陷期这里等的是 done）──
     const failsBeforeToggle = server.log.filter((entry) => entry.chunk === 'fail').length
+    // 开关拨两次 = 还原 → 重新开启（插件已收敛成"一个开关"）。
     if (!(await page.isVisible('.imt-menu'))) await page.click('.imt-ball')
-    await page.locator('.imt-menu-item', { hasText: '还原原文' }).click()
+    await page.click('.imt-switch-row')
     await sleep(800)
     if (!(await page.isVisible('.imt-menu'))) await page.click('.imt-ball')
-    await page.locator('.imt-menu-item', { hasText: '翻译此页' }).click()
+    await page.click('.imt-switch-row')
     let fired = null
     for (let i = 0; i < 600; i += 1) {
       const failAttempts = server.log.filter((entry) => entry.chunk === 'fail').length - failsBeforeToggle
